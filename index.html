@@ -386,7 +386,8 @@
     const valSlider = document.getElementById('modal-slider');
     
     valInput.value = values[key];
-    valSlider.min = isVolt ? 0 : 1;
+    valInput.min = isVolt ? '' : 0;
+    valSlider.min = 0;
     valSlider.max = isVolt ? 50 : 200;
     valSlider.value = values[key];
 
@@ -401,7 +402,10 @@
   }
 
   function syncModalInput() {
-    const val = parseFloat(document.getElementById('modal-input').value) || 0;
+    const input = document.getElementById('modal-input');
+    let val = parseFloat(input.value) || 0;
+    // Widerstände können nicht negativ sein (0 Ω = ideale Leitung ist erlaubt)
+    if (activeEditKey.startsWith('R') && val < 0) { val = 0; input.value = 0; }
     document.getElementById('modal-slider').value = val;
     values[activeEditKey] = val;
     updateSimulation();
@@ -429,6 +433,24 @@
     return str + " = 0";
   }
 
+  // Zahl formatieren; nicht bestimmbare Werte (null / ±∞ / NaN) als "—"
+  function fmt(x, digits) {
+    return (x === null || !Number.isFinite(x)) ? '—' : x.toFixed(digits);
+  }
+
+  // Löst R·I = ΔU für einen Zweig. Bei R = 0 gibt es zwei Sonderfälle:
+  //  ΔU ≠ 0 → Widerspruch (zwei ideale Quellen mit verschiedener Spannung kurzgeschlossen)
+  //  ΔU = 0 → Strom durch die Schaltung nicht festgelegt (jeder Wert erfüllt die Gleichung)
+  function solveBranch(dU, R) {
+    if (R !== 0) return { I: dU / R, state: 'ok' };
+    return { I: null, state: (dU === 0) ? 'undetermined' : 'contradiction' };
+  }
+
+  function warningHtml(msgs) {
+    if (!msgs.length) return '';
+    return msgs.map(m => `<div style="color: var(--eq-highlight); margin-top: 4px;">⚠ ${m}</div>`).join('');
+  }
+
   function calculateAndDisplay() {
     const container = document.getElementById('equation-display');
     const { U1, U2, U3, R1, R2, R3 } = values;
@@ -439,9 +461,18 @@
       const effU2 = U2 * sourceDirs.U2;
       const dI1 = currentDirs.I1;
 
-      const I1 = (effU1 - effU2) / (dI1 * (R1 + R2));
-      const UR1 = R1 * I1 * dI1;
-      const UR2 = R2 * I1 * dI1;
+      // Maschenumlauf ↻: -U1 + UR1 + U2 + UR2 = 0, mit UR = R·I (Verbraucher-Zählpfeilsystem)
+      const b1 = solveBranch(effU1 - effU2, R1 + R2);
+      const I1 = b1.I === null ? null : b1.I * dI1;
+      // Spannungspfeil an R zeigt immer in Richtung des zugehörigen Strompfeils → UR = R·I
+      // (bei R = 0 ist UR = 0 V, auch wenn I nicht bestimmbar ist)
+      const UR = (R, I) => (R === 0 && b1.state !== 'contradiction') ? 0 : (I === null ? null : R * I);
+      const UR1 = UR(R1, I1);
+      const UR2 = UR(R2, I1);
+
+      const warn = [];
+      if (b1.state === 'contradiction') warn.push('R<sub>1</sub> + R<sub>2</sub> = 0 Ω: Die idealen Quellen U<sub>1</sub> ≠ U<sub>2</sub> sind kurzgeschlossen. Der Maschensatz ist nicht erfüllbar, der Strom wäre unendlich gross.');
+      if (b1.state === 'undetermined') warn.push('R<sub>1</sub> + R<sub>2</sub> = 0 Ω und U<sub>1</sub> = U<sub>2</sub>: Jeder Strom I<sub>1</sub> erfüllt den Maschensatz – I<sub>1</sub> ist nicht bestimmbar.');
 
       const isCW = (meshDir.M1 === 'CW');
 
@@ -473,8 +504,9 @@
 
         <div class="eq-block eq-block-result">
           <div class="eq-title eq-title-result">Ergebnisse</div>
-          <div class="eq-res">I<sub>1</sub> = ${I1.toFixed(3)} A</div>
-          <div>U<sub>R1</sub> = ${UR1.toFixed(2)} V | U<sub>R2</sub> = ${UR2.toFixed(2)} V</div>
+          <div class="eq-res">I<sub>1</sub> = ${fmt(I1, 3)} A</div>
+          <div>U<sub>R1</sub> = ${fmt(UR1, 2)} V | U<sub>R2</sub> = ${fmt(UR2, 2)} V</div>
+          ${warningHtml(warn)}
         </div>
       `;
     } else {
@@ -484,14 +516,32 @@
 
       const dI1 = currentDirs.I1, dI2 = currentDirs.I2, dI3 = currentDirs.I3;
 
-      const I1 = (effU1 - effU2) / (dI1 * (R1 + R2));
-      const I2 = (effU2 - effU3) / (dI2 * R3);
-      
-      const I3 = (I1 * dI1 + I2 * dI2) / dI3;
+      // Masche 1 (↻): -U1 + UR1 + U2 + UR2 = 0
+      const b1 = solveBranch(effU1 - effU2, R1 + R2);
+      // Masche 2 (↻): -U2 - UR3 + U3 = 0  →  I2 = (U3 - U2) / R3
+      const b2 = solveBranch(effU3 - effU2, R3);
 
-      const UR1 = R1 * I1 * dI1;
-      const UR2 = R2 * I1 * dI1;
-      const UR3 = R3 * I2 * dI2;
+      // Ein Widerspruch in einer Masche heisst: Das ganze Gleichungssystem hat keine Lösung.
+      const anyContradiction = b1.state === 'contradiction' || b2.state === 'contradiction';
+
+      const I1 = (anyContradiction || b1.I === null) ? null : b1.I * dI1;
+      const I2 = (anyContradiction || b2.I === null) ? null : b2.I * dI2;
+
+      // Knotensatz oberer Knoten: Zufluss = Abfluss (I1, I2 hinein, I3 hinaus bei Standardrichtung)
+      const I3 = (I1 === null || I2 === null) ? null : (I1 * dI1 + I2 * dI2) / dI3;
+
+      // Spannungspfeil an R zeigt immer in Richtung des zugehörigen Strompfeils → UR = R·I
+      // (bei R = 0 ist UR = 0 V, auch wenn I nicht bestimmbar ist)
+      const UR = (R, I) => anyContradiction ? null : (R === 0 ? 0 : (I === null ? null : R * I));
+      const UR1 = UR(R1, I1);
+      const UR2 = UR(R2, I1);
+      const UR3 = UR(R3, I2);
+
+      const warn = [];
+      if (b1.state === 'contradiction') warn.push('R<sub>1</sub> + R<sub>2</sub> = 0 Ω: Die idealen Quellen U<sub>1</sub> ≠ U<sub>2</sub> sind kurzgeschlossen. Masche 1 ist nicht erfüllbar – die Schaltung hat keine Lösung.');
+      if (b2.state === 'contradiction') warn.push('R<sub>3</sub> = 0 Ω: Die idealen Quellen U<sub>2</sub> ≠ U<sub>3</sub> sind kurzgeschlossen. Masche 2 ist nicht erfüllbar – die Schaltung hat keine Lösung.');
+      if (!anyContradiction && b1.state === 'undetermined') warn.push('R<sub>1</sub> + R<sub>2</sub> = 0 Ω und U<sub>1</sub> = U<sub>2</sub>: Jeder Strom I<sub>1</sub> erfüllt Masche 1 – I<sub>1</sub> und damit I<sub>3</sub> sind nicht bestimmbar.');
+      if (!anyContradiction && b2.state === 'undetermined') warn.push('R<sub>3</sub> = 0 Ω und U<sub>2</sub> = U<sub>3</sub>: Jeder Strom I<sub>2</sub> erfüllt Masche 2 – I<sub>2</sub> und damit I<sub>3</sub> sind nicht bestimmbar.');
 
       const isCW1 = (meshDir.M1 === 'CW');
       const isCW2 = (meshDir.M2 === 'CW');
@@ -563,8 +613,9 @@
 
         <div class="eq-block eq-block-result">
           <div class="eq-title eq-title-result">Ergebnisse</div>
-          <div class="eq-res">I<sub>1</sub> = ${I1.toFixed(3)} A | I<sub>2</sub> = ${I2.toFixed(3)} A | I<sub>3</sub> = ${I3.toFixed(3)} A</div>
-          <div>U<sub>R1</sub>=${UR1.toFixed(1)}V, U<sub>R2</sub>=${UR2.toFixed(1)}V, U<sub>R3</sub>=${UR3.toFixed(1)}V</div>
+          <div class="eq-res">I<sub>1</sub> = ${fmt(I1, 3)} A | I<sub>2</sub> = ${fmt(I2, 3)} A | I<sub>3</sub> = ${fmt(I3, 3)} A</div>
+          <div>U<sub>R1</sub>=${fmt(UR1, 1)}V, U<sub>R2</sub>=${fmt(UR2, 1)}V, U<sub>R3</sub>=${fmt(UR3, 1)}V</div>
+          ${warningHtml(warn)}
         </div>
       `;
     }
@@ -603,15 +654,15 @@
     if (activeCircuit === 1) {
       svg.appendChild(createEl('rect', { x: 140, y: 65, width: 360, height: 170, class: 'wire' }));
 
-      drawSource(svg, 140, 150, 'U1', U1, 'left');
+      drawSource(svg, 140, 150, 'U1', U1, 'right');
       drawSource(svg, 500, 150, 'U2', U2, 'right');
       drawResistor(svg, 320, 65, 'R1', R1, 'top');
       drawResistor(svg, 320, 235, 'R2', R2, 'bottom');
 
       drawMeshArc(svg, 320, 150, 32, meshDir.M1, 'M1', 'M1');
 
-      drawSourceVoltageArrow(svg, 75, 100, 75, 200, 'U1', 'left', sourceDirs.U1);
-      drawSourceVoltageArrow(svg, 565, 100, 565, 200, 'U2', 'right', sourceDirs.U2);
+      drawSourceVoltageArrow(svg, 105, 100, 105, 200, 'U1', 'left', sourceDirs.U1);
+      drawSourceVoltageArrow(svg, 465, 100, 465, 200, 'U2', 'left', sourceDirs.U2);
 
       if (currentDirs.I1 === 1) {
         drawVoltageArrow(svg, 270, 25, 370, 25, 'UR1', 'top');
@@ -641,7 +692,7 @@
       drawMeshArc(svg, 220, 150, 28, meshDir.M1, 'M1', 'M1');
       drawMeshArc(svg, 420, 150, 30, meshDir.M2, 'M2', 'M2');
 
-      drawSourceVoltageArrow(svg, 55, 100, 55, 200, 'U1', 'left', sourceDirs.U1);
+      drawSourceVoltageArrow(svg, 85, 100, 85, 200, 'U1', 'left', sourceDirs.U1);
       drawSourceVoltageArrow(svg, 285, 100, 285, 200, 'U2', 'left', sourceDirs.U2);
       drawSourceVoltageArrow(svg, 485, 100, 485, 200, 'U3', 'left', sourceDirs.U3);
 
