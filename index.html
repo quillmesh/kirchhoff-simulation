@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Maschensatz Interactive Simulation - Solarized</title>
+  <title>Kirchhoff'sche Regeln – Interaktive Simulation</title>
   <style>
     :root {
       --bg: #fdf6e3;
@@ -254,17 +254,41 @@
 
     .wire { stroke: var(--text-bold); stroke-width: 2; fill: none; }
     .component-text { font-size: 11px; font-weight: bold; fill: var(--text-bold); }
+
+    /* Hauptauswahl Maschensatz / Knotensatz */
+    .tabs { flex-wrap: wrap; align-items: center; }
+    .rule-btn { font-size: 1rem; padding: 8px 18px; }
+    .path-select {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+      font-weight: bold;
+      font-size: 0.85rem;
+      color: var(--text-bold);
+    }
+    .path-btn { padding: 4px 10px; }
+    /* Stromkonvention: ein Button oben rechts in der Schaltungsfläche */
+    .circuit-view { position: relative; }
+    .conv-btn {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      display: none;
+      padding: 4px 10px;
+      font-size: 0.8rem;
+    }
+    .hit-area { stroke: transparent; stroke-width: 18; fill: none; }
   </style>
 </head>
 <body data-theme="dark">
 
 <header>
   <div>
-    <h1>Maschensatz Simulation</h1>
+    <h1>Kirchhoff'sche Regeln</h1>
     <div id="sub-title" style="font-size: 0.75rem; color: var(--text);">Klicken Sie auf Komponenten oder Maschen zum Anpassen</div>
   </div>
   <div class="header-controls">
-    <button class="btn" id="btn-node-rule" onclick="toggleNodeRule()">Stromkonvention: Zufluss + / Abfluss -</button>
     <button class="btn" id="btn-adv" onclick="toggleAdvanced()">Advanced: Aus</button>
     <button class="theme-toggle" onclick="toggleTheme()">Dark / Light</button>
   </div>
@@ -272,12 +296,24 @@
 
 <div class="main-layout">
   <div class="tabs">
+    <button class="tab-btn rule-btn active" id="btn-rule-mesh" onclick="selectRule('mesh')">Maschensatz</button>
+    <button class="tab-btn rule-btn" id="btn-rule-node" onclick="selectRule('node')">Knotensatz</button>
+  </div>
+
+  <div class="tabs">
     <button class="tab-btn active" id="btn-tab-1" onclick="selectCircuit(1)">1. Mit 2 Spannungsquellen</button>
     <button class="tab-btn" id="btn-tab-2" onclick="selectCircuit(2)">2. Mit 3 Spannungsquellen</button>
+    <div class="path-select" id="mesh-config"></div>
+    <div class="path-select" id="path-select">
+      Strompfade:
+      <button class="btn path-btn" id="btn-paths-4" onclick="selectPaths(4)">4</button>
+      <button class="btn path-btn" id="btn-paths-5" onclick="selectPaths(5)">5</button>
+    </div>
   </div>
 
   <div class="circuit-card">
     <div class="circuit-view">
+      <button class="btn conv-btn" id="btn-conv" onclick="toggleNodeRule()">Zufluss + / Abfluss −</button>
       <svg id="circuit-svg" viewBox="0 0 640 310"></svg>
     </div>
   </div>
@@ -309,8 +345,8 @@
   let nodeInflowIsPositive = true;
 
   let values = {
-    U1: 12, U2: 5, U3: 8,
-    R1: 10, R2: 20, R3: 30
+    U1: 12, U2: 5, U3: 8, U4: 6,
+    R1: 10, R2: 20, R3: 30, R4: 15, R5: 25, R6: 40
   };
 
   let meshDir = { M1: 'CW', M2: 'CW' };
@@ -318,18 +354,59 @@
   let sourceDirs = { U1: 1, U2: 1, U3: 1 };
   let activeEditKey = null;
 
+  // ===================== KNOTENSATZ – Zustand =====================
+  let activeRule = 'mesh';   // 'mesh' = Maschensatz, 'node' = Knotensatz
+  let knotCircuit = 1;       // 1 = Grundschaltung, 2 = mehrere Strompfade
+  let knotPaths = 4;         // Anzahl Strompfade in Schaltung 2 (4 oder 5)
+
+  // Jeder Zweig k verbindet den oberen Knoten K mit dem unteren Knoten (Bezug, 0 V):
+  //   optional eine Quelle U_k in Reihe mit einem Widerstand R_k (ohne Widerstand: 0 Ω).
+  // orient[k] = +1: Strompfeil I_k zeigt in den Knoten K hinein, -1: aus K hinaus.
+  // srcDir[k] = +1: Spannungspfeil der Quelle zeigt nach unten (oberes Ende +), -1: umgepolt.
+  function makeKnot(branches, vals, orient) {
+    const srcDir = {};
+    branches.forEach(b => { if (b.src) srcDir[b.k] = 1; });
+    return { branches, vals, orient, srcDir };
+  }
+
+  // Schaltung 2 (nur Prinzip, ohne Werte und Rechnung): n Strompfade am Knoten K;
+  // Pfade mit Quelle (in Reihe mit Widerstand) zeigen in den Knoten, reine Widerstandspfade hinaus.
+  function makePrinciple(n, srcBranches) {
+    const branches = [], orient = {};
+    for (let k = 1; k <= n; k++) {
+      const src = srcBranches.includes(k);
+      branches.push({ k, src, res: true });
+      orient[k] = src ? 1 : -1;
+    }
+    const c = makeKnot(branches, {}, orient);
+    c.principle = true;
+    return c;
+  }
+
+  const knotCircuits = {
+    // Schaltung 1 (Grundschaltung): Quelle U1 ohne Widerstand, R2 und R3 parallel.
+    // Pfeile wie im Knotenbild: I1 und I2 hinein, I3 hinaus.
+    1: makeKnot(
+      [{ k: 1, src: true, res: false }, { k: 2, src: false, res: true }, { k: 3, src: false, res: true }],
+      { U1: 12, R2: 20, R3: 30 },
+      { 1: 1, 2: 1, 3: -1 }),
+    4: makePrinciple(4, [1, 3]),
+    5: makePrinciple(5, [1, 3])
+  };
+
+  function currentKnot() {
+    return knotCircuits[knotCircuit === 1 ? 1 : knotPaths];
+  }
+
   function toggleTheme() {
     const body = document.body;
     const next = body.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
     body.setAttribute('data-theme', next);
   }
 
+  // Stromkonvention am Knoten (Button oben rechts in der Schaltungsfläche)
   function toggleNodeRule() {
     nodeInflowIsPositive = !nodeInflowIsPositive;
-    const btn = document.getElementById('btn-node-rule');
-    btn.innerText = nodeInflowIsPositive 
-      ? 'Stromkonvention: Zufluss + / Abfluss -' 
-      : 'Stromkonvention: Zufluss - / Abfluss +';
     updateSimulation();
   }
 
@@ -339,57 +416,113 @@
     btn.innerText = `Advanced: ${isAdvanced ? 'Ein' : 'Aus'}`;
     btn.classList.toggle('btn-active', isAdvanced);
     
-    document.getElementById('sub-title').innerText = isAdvanced 
-      ? 'Advanced-Modus: Klicken Sie auch auf Ströme oder Spannungsquellen-Pfeile, um deren Richtung zu drehen'
-      : 'Klicken Sie auf Komponenten oder Maschen zum Anpassen';
-      
     if (!isAdvanced) {
       sourceDirs = { U1: 1, U2: 1, U3: 1 };
       currentDirs = { I1: 1, I2: 1, I3: 1 };
+      // Knotensatz: Quellen wieder Standardpolung (Strompfeile bleiben, sie sind dort immer einstellbar)
+      Object.values(knotCircuits).forEach(c => Object.keys(c.srcDir).forEach(k => c.srcDir[k] = 1));
     }
     updateSimulation();
   }
 
+  // Bedienhinweis, Tabs und Zusatz-Buttons passend zu Regel und Schaltung anzeigen
+  function updateControls() {
+    const isMesh = activeRule === 'mesh';
+    const num = isMesh ? activeCircuit : knotCircuit;
+
+    document.getElementById('btn-rule-mesh').classList.toggle('active', isMesh);
+    document.getElementById('btn-rule-node').classList.toggle('active', !isMesh);
+
+    const t1 = document.getElementById('btn-tab-1'), t2 = document.getElementById('btn-tab-2');
+    t1.innerText = isMesh ? '1. Spannungsquellen in Serie' : '1. Grundschaltung (3 Ströme)';
+    t2.innerText = isMesh ? '2. Spannungsquellen parallel' : '2. Mehrere Strompfade';
+
+    // Maschensatz im Advanced-Modus: Anzahl Quellen und Widerstände wählbar
+    const mc = document.getElementById('mesh-config');
+    if (isMesh && isAdvanced) {
+      const cfg = meshConfig[activeCircuit], rng = meshRange(activeCircuit, cfg.nU);
+      const btns = (list, cur, fn) => list.map(n =>
+        `<button class="btn path-btn${n === cur ? ' btn-active' : ''}" onclick="${fn}(${n})">${n}</button>`).join('');
+      mc.innerHTML = `Quellen: ${btns(rng.U, cfg.nU, 'setMeshSources')}
+        <span style="width: 10px"></span> Widerstände: ${btns(rng.R, cfg.nR, 'setMeshResistors')}`;
+      mc.style.display = 'flex';
+    } else {
+      mc.style.display = 'none';
+    }
+    t1.classList.toggle('active', num === 1);
+    t2.classList.toggle('active', num === 2);
+
+    // Stromkonvention nur dort, wo ein Knotensatz vorkommt
+    const conv = document.getElementById('btn-conv');
+    conv.style.display = (!isMesh || num === 2) ? 'block' : 'none';
+    conv.innerText = nodeInflowIsPositive ? 'Zufluss + / Abfluss −' : 'Zufluss − / Abfluss +';
+    document.getElementById('path-select').style.display = (!isMesh && num === 2) ? 'flex' : 'none';
+    for (let n = 4; n <= 5; n++) {
+      document.getElementById('btn-paths-' + n).classList.toggle('btn-active', n === knotPaths);
+    }
+
+    let hint;
+    if (isMesh) {
+      hint = isAdvanced
+        ? 'Advanced-Modus: Klicken Sie auch auf Ströme oder Spannungsquellen-Pfeile, um deren Richtung zu drehen'
+        : 'Klicken Sie auf Komponenten oder Maschen zum Anpassen – im Advanced-Modus sind weitere Schaltungen wählbar';
+    } else {
+      hint = 'Klicken Sie auf Strompfeile (Knotenbild oder Schaltung), um die Richtung zu drehen, und auf Bauteile, um Werte anzupassen'
+        + (isAdvanced ? ' – Advanced: Spannungsquellen-Pfeile lassen sich umpolen' : '');
+    }
+    document.getElementById('sub-title').innerText = hint;
+  }
+
+  function selectRule(rule) {
+    activeRule = rule;
+    updateSimulation();
+  }
+
   function selectCircuit(num) {
-    activeCircuit = num;
-    document.getElementById('btn-tab-1').classList.toggle('active', num === 1);
-    document.getElementById('btn-tab-2').classList.toggle('active', num === 2);
-    
-    document.getElementById('btn-node-rule').style.display = (num === 1) ? 'none' : 'inline-block';
-    
+    if (activeRule === 'mesh') activeCircuit = num;
+    else knotCircuit = num;
+    updateSimulation();
+  }
+
+  function selectPaths(n) {
+    knotPaths = n;
     updateSimulation();
   }
 
   function toggleMesh(mKey) {
-    meshDir[mKey] = (meshDir[mKey] === 'CW') ? 'CCW' : 'CW';
+    meshDir[mKey] = (mdir(mKey) === 'CW') ? 'CCW' : 'CW';
     updateSimulation();
   }
 
   function toggleCurrentDir(iKey) {
     if (!isAdvanced) return;
-    currentDirs[iKey] *= -1;
+    currentDirs[iKey] = -flip(iKey);
     updateSimulation();
   }
 
   function toggleSourceDir(uKey) {
     if (!isAdvanced) return;
-    sourceDirs[uKey] *= -1;
+    sourceDirs[uKey] = -sdir(uKey);
     updateSimulation();
   }
 
-  function openEditModal(key) {
+  // Wertespeicher des gerade bearbeiteten Bauteils (Maschensatz: values, Knotensatz: Schaltung.vals)
+  let editStore = values;
+
+  function openEditModal(key, store = values) {
     activeEditKey = key;
+    editStore = store;
     const isVolt = key.startsWith('U');
     document.getElementById('modal-title').innerText = `${key} Wert anpassen (${isVolt ? 'V' : 'Ω'})`;
-    
+
     const valInput = document.getElementById('modal-input');
     const valSlider = document.getElementById('modal-slider');
-    
-    valInput.value = values[key];
+
+    valInput.value = editStore[key];
     valInput.min = isVolt ? '' : 0;
     valSlider.min = 0;
     valSlider.max = isVolt ? 50 : 200;
-    valSlider.value = values[key];
+    valSlider.value = editStore[key];
 
     document.getElementById('edit-modal').style.display = 'flex';
   }
@@ -397,7 +530,7 @@
   function syncModalSlider() {
     const val = parseFloat(document.getElementById('modal-slider').value) || 0;
     document.getElementById('modal-input').value = val;
-    values[activeEditKey] = val;
+    editStore[activeEditKey] = val;
     updateSimulation();
   }
 
@@ -407,7 +540,7 @@
     // Widerstände können nicht negativ sein (0 Ω = ideale Leitung ist erlaubt)
     if (activeEditKey.startsWith('R') && val < 0) { val = 0; input.value = 0; }
     document.getElementById('modal-slider').value = val;
-    values[activeEditKey] = val;
+    editStore[activeEditKey] = val;
     updateSimulation();
   }
 
@@ -416,8 +549,17 @@
   }
 
   function updateSimulation() {
-    renderSVG();
-    calculateAndDisplay();
+    updateControls();
+    const svg = document.getElementById('circuit-svg');
+    if (activeRule === 'mesh') {
+      svg.setAttribute('viewBox', '0 0 640 310');
+      renderSVG();
+      calculateAndDisplay();
+    } else {
+      svg.setAttribute('viewBox', '0 0 960 310');
+      renderKnotSVG();
+      calculateKnot();
+    }
   }
 
   function formatSum(terms) {
@@ -435,7 +577,9 @@
 
   // Zahl formatieren; nicht bestimmbare Werte (null / ±∞ / NaN) als "—"
   function fmt(x, digits) {
-    return (x === null || !Number.isFinite(x)) ? '—' : x.toFixed(digits);
+    if (x === null || !Number.isFinite(x)) return '—';
+    // "-0.000" vermeiden: Werte, die gerundet 0 sind, ohne Vorzeichen anzeigen
+    return Number(x.toFixed(digits)) === 0 ? (0).toFixed(digits) : x.toFixed(digits);
   }
 
   // Löst R·I = ΔU für einen Zweig. Bei R = 0 gibt es zwei Sonderfälle:
@@ -451,269 +595,309 @@
     return msgs.map(m => `<div style="color: var(--eq-highlight); margin-top: 4px;">⚠ ${m}</div>`).join('');
   }
 
-  function calculateAndDisplay() {
-    const container = document.getElementById('equation-display');
-    const { U1, U2, U3, R1, R2, R3 } = values;
-    let html = "";
+  // ===================== MASCHENSATZ – Schaltungsmodell =====================
+  // Schaltung 1 = Spannungsquellen in Serie: eine Masche, Quellen links/rechts, Widerstände oben/unten.
+  // Schaltung 2 = Spannungsquellen parallel: Quellen in senkrechten Zweigen, Widerstände in den
+  //               Leitungsabschnitten dazwischen; jeder Abschnitt bildet eine Masche.
+  // Ohne Advanced-Modus gilt immer die Standardschaltung (wie bisher).
+  const meshDefaults = { 1: { nU: 2, nR: 2 }, 2: { nU: 3, nR: 3 } };
+  const meshConfig = { 1: { nU: 2, nR: 2 }, 2: { nU: 3, nR: 3 } };
 
-    if (activeCircuit === 1) {
-      const effU1 = U1 * sourceDirs.U1;
-      const effU2 = U2 * sourceDirs.U2;
-      const dI1 = currentDirs.I1;
+  function meshRange(circuit, nU) {
+    if (circuit === 1) return { U: [1, 2, 3, 4], R: [1, 2, 3, 4, 5, 6] };
+    // Parallel: jede Masche braucht mindestens einen Widerstand
+    return { U: [3, 4], R: nU === 4 ? [3, 4] : [2, 3, 4] };
+  }
 
-      // Maschenumlauf ↻: -U1 + UR1 + U2 + UR2 = 0, mit UR = R·I (Verbraucher-Zählpfeilsystem)
-      const b1 = solveBranch(effU1 - effU2, R1 + R2);
-      const I1 = b1.I === null ? null : b1.I * dI1;
-      // Spannungspfeil an R zeigt immer in Richtung des zugehörigen Strompfeils → UR = R·I
-      // (bei R = 0 ist UR = 0 V, auch wenn I nicht bestimmbar ist)
-      const UR = (R, I) => (R === 0 && b1.state !== 'contradiction') ? 0 : (I === null ? null : R * I);
-      const UR1 = UR(R1, I1);
-      const UR2 = UR(R2, I1);
+  function activeMeshConfig() {
+    return isAdvanced ? meshConfig[activeCircuit] : meshDefaults[activeCircuit];
+  }
 
-      const warn = [];
-      if (b1.state === 'contradiction') warn.push('R<sub>1</sub> + R<sub>2</sub> = 0 Ω: Die idealen Quellen U<sub>1</sub> ≠ U<sub>2</sub> sind kurzgeschlossen. Der Maschensatz ist nicht erfüllbar, der Strom wäre unendlich gross.');
-      if (b1.state === 'undetermined') warn.push('R<sub>1</sub> + R<sub>2</sub> = 0 Ω und U<sub>1</sub> = U<sub>2</sub>: Jeder Strom I<sub>1</sub> erfüllt den Maschensatz – I<sub>1</sub> ist nicht bestimmbar.');
+  function setMeshSources(n) {
+    const cfg = meshConfig[activeCircuit];
+    cfg.nU = n;
+    const r = meshRange(activeCircuit, n).R;
+    if (!r.includes(cfg.nR)) cfg.nR = r.includes(3) ? 3 : r[0];
+    updateSimulation();
+  }
 
-      const isCW = (meshDir.M1 === 'CW');
+  function setMeshResistors(n) {
+    meshConfig[activeCircuit].nR = n;
+    updateSimulation();
+  }
 
-      const align_U1 = isCW ? -sourceDirs.U1 : sourceDirs.U1;
-      const align_UR1 = isCW ? currentDirs.I1 : -currentDirs.I1;
-      const align_U2 = isCW ? sourceDirs.U2 : -sourceDirs.U2;
-      const align_UR2 = isCW ? currentDirs.I1 : -currentDirs.I1;
+  // Effektive Richtung eines Strompfeils: Grundrichtung des Modells · Umkehrung durch Klick (currentDirs)
+  const flip = name => (currentDirs[name] === undefined ? 1 : currentDirs[name]);
+  const sdir = name => (sourceDirs[name] === undefined ? 1 : sourceDirs[name]);
+  const mdir = key => (meshDir[key] === undefined ? 'CW' : meshDir[key]);
 
-      const termsM1 = [
-        { name: 'U<sub>1</sub>', sign: align_U1 },
-        { name: 'U<sub>R1</sub>', sign: align_UR1 },
-        { name: 'U<sub>2</sub>', sign: align_U2 },
-        { name: 'U<sub>R2</sub>', sign: align_UR2 }
-      ];
+  // Spannungsquellen in Serie
+  function buildSeries(nU, nR) {
+    const xL = 140, xR = 500, yT = 65, yB = 235;
+    const m = { width: 640, rect: [xL, yT, xR - xL, yB - yT], lines: [], dots: [], sources: [], resistors: [], currents: [], meshes: [], nodes: [], kind: 'series' };
 
-      const termsM1_sub = [
-        { name: 'U<sub>1</sub>', sign: align_U1 },
-        { name: '(R<sub>1</sub> · I<sub>1</sub>)', sign: align_UR1 },
-        { name: 'U<sub>2</sub>', sign: align_U2 },
-        { name: '(R<sub>2</sub> · I<sub>1</sub>)', sign: align_UR2 }
-      ];
+    // Quellen: links U1 (unten), U3 (oben); rechts U2 (oben), U4 (unten)
+    const left = [1, 3].filter(k => k <= nU), right = [2, 4].filter(k => k <= nU);
+    const ys = (n, order) => n === 1 ? [150] : order;
+    const yLeft = ys(left.length, [195, 105]), yRight = ys(right.length, [105, 195]);
+    left.forEach((k, i) => m.sources.push({ name: 'U' + k, x: xL, y: yLeft[i], side: 'left' }));
+    right.forEach((k, i) => m.sources.push({ name: 'U' + k, x: xR, y: yRight[i], side: 'right' }));
 
-      html += `
-        <div class="eq-block eq-block-mesh">
-          <div class="eq-title eq-title-mesh">Maschensatz (M<sub>1</sub> - ${isCW ? '↻' : '↺'})</div>
-          <div><strong>1. Symbolisch:</strong> ${formatSum(termsM1)}</div>
-          <div class="eq-sub"><strong>2. Einsetzen (U<sub>R</sub> = R·I):</strong> ${formatSum(termsM1_sub)}</div>
-        </div>
+    // Widerstände: oben R1, R3, R5 (links → rechts); unten R2, R4, R6 (rechts → links)
+    const top = [1, 3, 5].filter(k => k <= nR), bot = [2, 4, 6].filter(k => k <= nR);
+    const xTop = { 1: [320], 2: [250, 350], 3: [200, 290, 380] }[top.length];
+    const xBot = { 0: [], 1: [320], 2: [370, 270], 3: [410, 320, 230] }[bot.length];
+    const urLen = n => (n === 1 ? 100 : 70);
+    top.forEach((k, i) => m.resistors.push({ name: 'R' + k, cx: xTop[i], cy: yT, pos: 'top', cur: 'I1', half: urLen(top.length) / 2 }));
+    bot.forEach((k, i) => m.resistors.push({ name: 'R' + k, cx: xBot[i], cy: yB, pos: 'bottom', cur: 'I1', half: urLen(bot.length) / 2 }));
 
-        <div class="eq-block eq-block-result">
-          <div class="eq-title eq-title-result">Ergebnisse</div>
-          <div class="eq-res">I<sub>1</sub> = ${fmt(I1, 3)} A</div>
-          <div>U<sub>R1</sub> = ${fmt(UR1, 2)} V | U<sub>R2</sub> = ${fmt(UR2, 2)} V</div>
-          ${warningHtml(warn)}
-        </div>
-      `;
-    } else {
-      const effU1 = U1 * sourceDirs.U1;
-      const effU2 = U2 * sourceDirs.U2;
-      const effU3 = U3 * sourceDirs.U3;
+    // Ein Strom I1 auf der oberen Leitung, Grundrichtung nach rechts (= Umlauf im Uhrzeigersinn)
+    const xa = xTop[xTop.length - 1] + ({ 1: 70, 2: 45, 3: 35 }[top.length]);   // Abstand zur Ecke freihalten
+    m.currents.push({ name: 'I1', base: 1, horiz: true, x1: xa, y1: yT, x2: xa + 40, y2: yT, labelPos: 'top' });
 
-      const dI1 = currentDirs.I1, dI2 = currentDirs.I2, dI3 = currentDirs.I3;
+    // Masche in Umlaufreihenfolge (↻): linke Seite aufwärts, oben, rechte Seite abwärts, unten
+    const terms = [];
+    [...left].forEach(k => terms.push({ kind: 'U', name: 'U' + k, side: 'left' }));
+    top.forEach(k => terms.push({ kind: 'R', name: 'R' + k, cur: 'I1' }));
+    right.forEach(k => terms.push({ kind: 'U', name: 'U' + k, side: 'right' }));
+    bot.forEach(k => terms.push({ kind: 'R', name: 'R' + k, cur: 'I1' }));
+    m.meshes.push({ key: 'M1', cx: 320, cy: 150, r: 32, terms });
+    return m;
+  }
 
-      // Masche 1 (↻): -U1 + UR1 + U2 + UR2 = 0
-      const b1 = solveBranch(effU1 - effU2, R1 + R2);
-      // Masche 2 (↻): -U2 - UR3 + U3 = 0  →  I2 = (U3 - U2) / R3
-      const b2 = solveBranch(effU3 - effU2, R3);
+  // Spannungsquellen parallel
+  function buildParallel(nU, nR) {
+    const xs = nU === 3 ? [120, 320, 520] : [120, 320, 520, 720];
+    const yT = 65, yB = 235, nS = nU - 1;
+    const m = { width: nU === 3 ? 640 : 840, rect: [xs[0], yT, xs[nU - 1] - xs[0], yB - yT], lines: [], dots: [], sources: [], resistors: [], currents: [], meshes: [], nodes: [], kind: 'parallel', nS };
 
-      // Ein Widerspruch in einer Masche heisst: Das ganze Gleichungssystem hat keine Lösung.
-      const anyContradiction = b1.state === 'contradiction' || b2.state === 'contradiction';
+    xs.forEach((x, j) => {
+      m.sources.push({ name: 'U' + (j + 1), x, y: 150, side: j === 0 ? 'left' : 'mid' });
+      if (j > 0 && j < nU - 1) {
+        m.lines.push([x, yT, x, yB]);
+        m.dots.push([x, yT], [x, yB]);
+      }
+    });
 
-      const I1 = (anyContradiction || b1.I === null) ? null : b1.I * dI1;
-      const I2 = (anyContradiction || b2.I === null) ? null : b2.I * dI2;
+    // Widerstände je Abschnitt s (oben/unten). Erster Abschnitt erhält zuerst einen unteren Widerstand.
+    const layouts = {
+      3: { 2: [['t'], ['t']], 3: [['t', 'b'], ['t']], 4: [['t', 'b'], ['t', 'b']] },
+      4: { 3: [['t'], ['t'], ['t']], 4: [['t', 'b'], ['t'], ['t']] }
+    };
+    const lay = layouts[nU][nR];
+    const segR = [];
+    let rk = 1;
+    lay.forEach((list, s) => {
+      const c = (xs[s] + xs[s + 1]) / 2;
+      segR.push({ top: [], bot: [] });
+      list.forEach(p => {
+        const name = 'R' + (rk++);
+        m.resistors.push({ name, cx: c, cy: p === 't' ? yT : yB, pos: p === 't' ? 'top' : 'bottom', cur: 'I' + (s + 1), half: 50 });
+        segR[s][p === 't' ? 'top' : 'bot'].push(name);
+      });
+    });
 
-      // Knotensatz oberer Knoten: Zufluss = Abfluss (I1, I2 hinein, I3 hinaus bei Standardrichtung)
-      const I3 = (I1 === null || I2 === null) ? null : (I1 * dI1 + I2 * dI2) / dI3;
-
-      // Spannungspfeil an R zeigt immer in Richtung des zugehörigen Strompfeils → UR = R·I
-      // (bei R = 0 ist UR = 0 V, auch wenn I nicht bestimmbar ist)
-      const UR = (R, I) => anyContradiction ? null : (R === 0 ? 0 : (I === null ? null : R * I));
-      const UR1 = UR(R1, I1);
-      const UR2 = UR(R2, I1);
-      const UR3 = UR(R3, I2);
-
-      const warn = [];
-      if (b1.state === 'contradiction') warn.push('R<sub>1</sub> + R<sub>2</sub> = 0 Ω: Die idealen Quellen U<sub>1</sub> ≠ U<sub>2</sub> sind kurzgeschlossen. Masche 1 ist nicht erfüllbar – die Schaltung hat keine Lösung.');
-      if (b2.state === 'contradiction') warn.push('R<sub>3</sub> = 0 Ω: Die idealen Quellen U<sub>2</sub> ≠ U<sub>3</sub> sind kurzgeschlossen. Masche 2 ist nicht erfüllbar – die Schaltung hat keine Lösung.');
-      if (!anyContradiction && b1.state === 'undetermined') warn.push('R<sub>1</sub> + R<sub>2</sub> = 0 Ω und U<sub>1</sub> = U<sub>2</sub>: Jeder Strom I<sub>1</sub> erfüllt Masche 1 – I<sub>1</sub> und damit I<sub>3</sub> sind nicht bestimmbar.');
-      if (!anyContradiction && b2.state === 'undetermined') warn.push('R<sub>3</sub> = 0 Ω und U<sub>2</sub> = U<sub>3</sub>: Jeder Strom I<sub>2</sub> erfüllt Masche 2 – I<sub>2</sub> und damit I<sub>3</sub> sind nicht bestimmbar.');
-
-      const isCW1 = (meshDir.M1 === 'CW');
-      const isCW2 = (meshDir.M2 === 'CW');
-
-      const m1_align_U1  = isCW1 ? -sourceDirs.U1 : sourceDirs.U1;
-      const m1_align_UR1 = isCW1 ? currentDirs.I1 : -currentDirs.I1;
-      const m1_align_U2  = isCW1 ? sourceDirs.U2 : -sourceDirs.U2;
-      const m1_align_UR2 = isCW1 ? currentDirs.I1 : -currentDirs.I1;
-
-      const termsM1 = [
-        { name: 'U<sub>1</sub>', sign: m1_align_U1 },
-        { name: 'U<sub>R1</sub>', sign: m1_align_UR1 },
-        { name: 'U<sub>2</sub>', sign: m1_align_U2 },
-        { name: 'U<sub>R2</sub>', sign: m1_align_UR2 }
-      ];
-
-      const termsM1_sub = [
-        { name: 'U<sub>1</sub>', sign: m1_align_U1 },
-        { name: '(R<sub>1</sub> · I<sub>1</sub>)', sign: m1_align_UR1 },
-        { name: 'U<sub>2</sub>', sign: m1_align_U2 },
-        { name: '(R<sub>2</sub> · I<sub>1</sub>)', sign: m1_align_UR2 }
-      ];
-
-      const m2_align_U2  = isCW2 ? -sourceDirs.U2 : sourceDirs.U2;
-      const m2_align_UR3 = isCW2 ? -currentDirs.I2 : currentDirs.I2;
-      const m2_align_U3  = isCW2 ? sourceDirs.U3 : -sourceDirs.U3;
-
-      const termsM2 = [
-        { name: 'U<sub>2</sub>', sign: m2_align_U2 },
-        { name: 'U<sub>R3</sub>', sign: m2_align_UR3 },
-        { name: 'U<sub>3</sub>', sign: m2_align_U3 }
-      ];
-
-      const termsM2_sub = [
-        { name: 'U<sub>2</sub>', sign: m2_align_U2 },
-        { name: '(R<sub>3</sub> · I<sub>2</sub>)', sign: m2_align_UR3 },
-        { name: 'U<sub>3</sub>', sign: m2_align_U3 }
-      ];
-
-      const rawI1 = 1 * currentDirs.I1;
-      const rawI2 = 1 * currentDirs.I2;
-      const rawI3 = -1 * currentDirs.I3;
-
-      const mul = nodeInflowIsPositive ? 1 : -1;
-
-      const nodeTerms = [
-        { name: 'I<sub>1</sub>', sign: rawI1 * mul },
-        { name: 'I<sub>2</sub>', sign: rawI2 * mul },
-        { name: 'I<sub>3</sub>', sign: rawI3 * mul }
-      ];
-
-      html += `
-        <div class="eq-block eq-block-node">
-          <div class="eq-title eq-title-node">Knotensatz (Oberer Knoten) [${nodeInflowIsPositive ? 'Zufluss +' : 'Zufluss -'}]</div>
-          <div><strong>Gleichung:</strong> ${formatSum(nodeTerms)}</div>
-        </div>
-
-        <div class="eq-block eq-block-mesh">
-          <div class="eq-title eq-title-mesh">Masche 1 (M<sub>1</sub> - ${isCW1 ? '↻' : '↺'})</div>
-          <div>${formatSum(termsM1)}</div>
-          <div class="eq-sub">${formatSum(termsM1_sub)}</div>
-        </div>
-
-        <div class="eq-block eq-block-mesh">
-          <div class="eq-title eq-title-mesh">Masche 2 (M<sub>2</sub> - ${isCW2 ? '↻' : '↺'})</div>
-          <div>${formatSum(termsM2)}</div>
-          <div class="eq-sub">${formatSum(termsM2_sub)}</div>
-        </div>
-
-        <div class="eq-block eq-block-result">
-          <div class="eq-title eq-title-result">Ergebnisse</div>
-          <div class="eq-res">I<sub>1</sub> = ${fmt(I1, 3)} A | I<sub>2</sub> = ${fmt(I2, 3)} A | I<sub>3</sub> = ${fmt(I3, 3)} A</div>
-          <div>U<sub>R1</sub>=${fmt(UR1, 1)}V, U<sub>R2</sub>=${fmt(UR2, 1)}V, U<sub>R3</sub>=${fmt(UR3, 1)}V</div>
-          ${warningHtml(warn)}
-        </div>
-      `;
+    // Abschnittsströme I1..I(n-1): Grundrichtung zum Knoten hin (letzter Abschnitt nach links)
+    for (let s = 0; s < nS; s++) {
+      const base = (s === nS - 1) ? -1 : 1;
+      const [xa, xb] = base === 1 ? [xs[s + 1] - 55, xs[s + 1] - 25] : [xs[s] + 55, xs[s] + 25];
+      m.currents.push({ name: 'I' + (s + 1), base, horiz: true, seg: s, x1: xa, y1: yT, x2: xb, y2: yT, labelPos: 'top' });
+    }
+    // Zweigströme der mittleren Quellen: Grundrichtung nach unten
+    const branchCur = {};
+    for (let j = 1; j < nU - 1; j++) {
+      const name = 'I' + (nS + j);
+      branchCur[j] = name;
+      m.currents.push({ name, base: 1, horiz: false, branch: j, x1: xs[j], y1: 85, x2: xs[j], y2: 115, labelPos: 'right' });
     }
 
-    container.innerHTML = html;
+    // Maschen: je Abschnitt s → linke Quelle, oben, rechte Quelle, unten
+    for (let s = 0; s < nS; s++) {
+      const terms = [{ kind: 'U', name: 'U' + (s + 1), side: 'left' }];
+      segR[s].top.forEach(n => terms.push({ kind: 'R', name: n, cur: 'I' + (s + 1) }));
+      terms.push({ kind: 'U', name: 'U' + (s + 2), side: 'right' });
+      segR[s].bot.forEach(n => terms.push({ kind: 'R', name: n, cur: 'I' + (s + 1) }));
+      m.meshes.push({ key: 'M' + (s + 1), cx: (xs[s] + xs[s + 1]) / 2, cy: 150, r: s === 0 ? 28 : 30, terms });
+    }
+
+    // Knoten oben an jedem mittleren Zweig: in = +1 bezogen auf die Grundrichtung "nach rechts" bzw. "nach unten"
+    for (let j = 1; j < nU - 1; j++) {
+      m.nodes.push({
+        title: nU === 3 ? 'Oberer Knoten' : `Knoten K${j}`,
+        label: nU === 3 ? null : `K${j}`, x: xs[j], y: yT,
+        terms: [
+          { cur: 'I' + j, right: 1 },          // Abschnitt links vom Knoten: nach rechts = hinein
+          { cur: 'I' + (j + 1), right: -1 },   // Abschnitt rechts vom Knoten: nach rechts = hinaus
+          { cur: branchCur[j], down: -1 }      // Zweig: nach unten = hinaus
+        ]
+      });
+    }
+    m.segR = segR;
+    m.branchCur = branchCur;
+    return m;
+  }
+
+  function buildMeshModel() {
+    const cfg = activeMeshConfig();
+    return activeCircuit === 1 ? buildSeries(cfg.nU, cfg.nR) : buildParallel(cfg.nU, cfg.nR);
+  }
+
+  // Effektive Pfeilrichtung: +1 = nach rechts (waagrecht) bzw. nach unten (senkrecht)
+  function effDir(m, name) {
+    const c = m.currents.find(c => c.name === name);
+    return c.base * flip(name);
+  }
+
+  // Löst das Modell. E = Quellenspannung mit Polung (Pfeil nach unten = oberes Ende +).
+  function solveMesh(m) {
+    const E = n => values[n] * sdir(n);
+    const R = n => values[n];
+    const I = {}, warn = [];
+    let contradiction = false;
+
+    if (m.kind === 'series') {
+      const sumL = m.sources.filter(s => s.side === 'left').reduce((a, s) => a + E(s.name), 0);
+      const sumR = m.sources.filter(s => s.side === 'right').reduce((a, s) => a + E(s.name), 0);
+      const sumRes = m.resistors.reduce((a, r) => a + R(r.name), 0);
+      // Umlauf ↻ mit physikalischem Strom J (oben nach rechts): -ΣE_links + ΣR·J + ΣE_rechts = 0
+      const b = solveBranch(sumL - sumR, sumRes);
+      I.I1 = b.I === null ? null : b.I * effDir(m, 'I1');
+      if (b.state === 'contradiction') { contradiction = true; warn.push('Alle Widerstände = 0 Ω: Die idealen Quellen sind kurzgeschlossen. Der Maschensatz ist nicht erfüllbar, der Strom wäre unendlich gross.'); }
+      if (b.state === 'undetermined') warn.push('Alle Widerstände = 0 Ω und die Quellen heben sich auf: Jeder Strom I<sub>1</sub> erfüllt den Maschensatz – I<sub>1</sub> ist nicht bestimmbar.');
+    } else {
+      // Abschnitt s: J_s (oben nach rechts) = (E_links - E_rechts) / (R_oben + R_unten)
+      const J = [];
+      for (let s = 0; s < m.nS; s++) {
+        const rs = [...m.segR[s].top, ...m.segR[s].bot];
+        const b = solveBranch(E('U' + (s + 1)) - E('U' + (s + 2)), rs.reduce((a, n) => a + R(n), 0));
+        J.push(b.I);
+        const rNames = rs.map(n => `${n[0]}<sub>${n.slice(1)}</sub>`).join(' + ');
+        if (b.state === 'contradiction') { contradiction = true; warn.push(`Masche ${s + 1}: ${rNames} = 0 Ω, aber U<sub>${s + 1}</sub> ≠ U<sub>${s + 2}</sub> – die idealen Quellen sind kurzgeschlossen. Die Schaltung hat keine Lösung.`); }
+        if (b.state === 'undetermined') warn.push(`Masche ${s + 1}: ${rNames} = 0 Ω und U<sub>${s + 1}</sub> = U<sub>${s + 2}</sub> – I<sub>${s + 1}</sub> ist nicht bestimmbar.`);
+      }
+      for (let s = 0; s < m.nS; s++) I['I' + (s + 1)] = (contradiction || J[s] === null) ? null : J[s] * effDir(m, 'I' + (s + 1));
+      Object.entries(m.branchCur).forEach(([j, name]) => {
+        j = +j;
+        const a = J[j - 1], b = J[j];
+        I[name] = (contradiction || a === null || b === null) ? null : (a - b) * effDir(m, name);   // Knotensatz
+      });
+    }
+
+    // Spannungspfeil am Widerstand parallel zum Strompfeil → U_R = R·I (bei 0 Ω: 0 V)
+    const UR = {};
+    m.resistors.forEach(r => {
+      UR[r.name] = contradiction ? null : (R(r.name) === 0 ? 0 : (I[r.cur] === null ? null : R(r.name) * I[r.cur]));
+    });
+    return { I, UR, warn };
+  }
+
+  function calculateAndDisplay() {
+    const m = buildMeshModel();
+    const s = solveMesh(m);
+    const sub = n => `${n[0]}<sub>${n.slice(1)}</sub>`;
+    const mul = nodeInflowIsPositive ? 1 : -1;
+    let html = '';
+
+    // Knotensätze (nur Parallelschaltung)
+    m.nodes.forEach(nd => {
+      const terms = nd.terms.map(t => ({
+        name: sub(t.cur),
+        sign: (t.right !== undefined ? t.right : t.down) * effDir(m, t.cur) * mul
+      }));
+      html += `
+        <div class="eq-block eq-block-node">
+          <div class="eq-title eq-title-node">Knotensatz (${nd.title}) [${nodeInflowIsPositive ? 'Zufluss +' : 'Zufluss -'}]</div>
+          <div><strong>Gleichung:</strong> ${formatSum(terms)}</div>
+        </div>`;
+    });
+
+    // Maschensätze: Pfeil in Umlaufrichtung → +, dagegen → −
+    m.meshes.forEach(ms => {
+      const cw = mdir(ms.key) === 'CW' ? 1 : -1;
+      const sym = [], subst = [];
+      ms.terms.forEach(t => {
+        if (t.kind === 'U') {
+          const sign = (t.side === 'left' ? -1 : 1) * sdir(t.name) * cw;
+          sym.push({ name: sub(t.name), sign });
+          subst.push({ name: sub(t.name), sign });
+        } else {
+          const sign = effDir(m, t.cur) * cw;
+          sym.push({ name: `U<sub>${t.name}</sub>`, sign });
+          subst.push({ name: `(${sub(t.name)} · ${sub(t.cur)})`, sign });
+        }
+      });
+      const arrow = cw === 1 ? '↻' : '↺';
+      if (m.kind === 'series') {
+        html += `
+        <div class="eq-block eq-block-mesh">
+          <div class="eq-title eq-title-mesh">Maschensatz (M<sub>1</sub> - ${arrow})</div>
+          <div><strong>1. Symbolisch:</strong> ${formatSum(sym)}</div>
+          <div class="eq-sub"><strong>2. Einsetzen (U<sub>R</sub> = R·I):</strong> ${formatSum(subst)}</div>
+        </div>`;
+      } else {
+        html += `
+        <div class="eq-block eq-block-mesh">
+          <div class="eq-title eq-title-mesh">Masche ${ms.key.slice(1)} (M<sub>${ms.key.slice(1)}</sub> - ${arrow})</div>
+          <div>${formatSum(sym)}</div>
+          <div class="eq-sub">${formatSum(subst)}</div>
+        </div>`;
+      }
+    });
+
+    const iNames = m.currents.map(c => c.name).sort((a, b) => +a.slice(1) - +b.slice(1));
+    const digits = m.kind === 'series' ? 2 : 1;
+    const iList = iNames.map(n => `${sub(n)} = ${fmt(s.I[n], 3)} A`).join(' | ');
+    const urList = m.resistors.map(r => r.name).sort((a, b) => +a.slice(1) - +b.slice(1))
+      .map(n => `U<sub>${n}</sub> = ${fmt(s.UR[n], digits)} V`).join(' | ');
+    html += `
+        <div class="eq-block eq-block-result">
+          <div class="eq-title eq-title-result">Ergebnisse</div>
+          <div class="eq-res">${iList}</div>
+          <div>${urList}</div>
+          ${warningHtml(s.warn)}
+        </div>`;
+
+    document.getElementById('equation-display').innerHTML = html;
   }
 
   function renderSVG() {
     const svg = document.getElementById('circuit-svg');
     svg.innerHTML = '';
+    addMarkers(svg);
+    const m = buildMeshModel();
+    svg.setAttribute('viewBox', `0 0 ${m.width} 310`);
 
-    const createEl = (tag, attrs) => {
-      const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
-      for (let k in attrs) el.setAttribute(k, attrs[k]);
-      return el;
-    };
+    const [rx, ry, rw, rh] = m.rect;
+    kEl('rect', { x: rx, y: ry, width: rw, height: rh, class: 'wire' }, svg);
+    m.lines.forEach(([x1, y1, x2, y2]) => kEl('line', { x1, y1, x2, y2, class: 'wire' }, svg));
+    m.dots.forEach(([x, y]) => kEl('circle', { cx: x, cy: y, r: 4, fill: 'var(--text-bold)' }, svg));
+    m.nodes.forEach(nd => { if (nd.label) kText(svg, nd.x + 7, nd.y - 8, `K<tspan dy="3" font-size="8">${nd.label.slice(1)}</tspan>`, { fill: 'var(--text-bold)' }); });
 
-    const defs = createEl('defs');
-    
-    const mVolt = createEl('marker', { id: 'arr-v', viewBox: '0 0 10 10', refX: '6', refY: '5', markerWidth: '5', markerHeight: '5', orient: 'auto-start-reverse' });
-    mVolt.appendChild(createEl('path', { d: 'M 0 0 L 10 5 L 0 10 z', fill: 'var(--volt-color)' }));
-    defs.appendChild(mVolt);
+    // Quellen mit Spannungspfeil 35 px links; Pfeillänge 100 (eine Quelle pro Seite) bzw. 60 (zwei)
+    m.sources.forEach(src => {
+      drawSource(svg, src.x, src.y, src.name, values[src.name], 'right');
+      const sameSide = m.sources.filter(o => o.x === src.x).length;
+      const half = sameSide > 1 ? 30 : 50;
+      drawSourceVoltageArrow(svg, src.x - 35, src.y - half, src.x - 35, src.y + half, src.name, 'left', sdir(src.name));
+    });
 
-    const mCurr = createEl('marker', { id: 'arr-c', viewBox: '0 0 10 10', refX: '6', refY: '5', markerWidth: '5', markerHeight: '5', orient: 'auto-start-reverse' });
-    mCurr.appendChild(createEl('path', { d: 'M 0 0 L 10 5 L 0 10 z', fill: 'var(--curr-color)' }));
-    defs.appendChild(mCurr);
+    // Widerstände mit Spannungspfeil 40 px ausserhalb, Richtung wie der zugehörige Strompfeil
+    m.resistors.forEach(r => {
+      drawResistor(svg, r.cx, r.cy, r.name, values[r.name], r.pos);
+      const d = effDir(m, r.cur);                      // +1: Strompfeil oben nach rechts
+      const towardsRight = r.pos === 'top' ? d === 1 : d === -1;
+      const y = r.pos === 'top' ? 25 : 275;
+      const [x1, x2] = towardsRight ? [r.cx - r.half, r.cx + r.half] : [r.cx + r.half, r.cx - r.half];
+      drawVoltageArrow(svg, x1, y, x2, y, 'U' + r.name, r.pos);
+    });
 
-    const mMesh = createEl('marker', { id: 'arr-m', viewBox: '0 0 10 10', refX: '6', refY: '5', markerWidth: '5', markerHeight: '5', orient: 'auto-start-reverse' });
-    mMesh.appendChild(createEl('path', { d: 'M 0 0 L 10 5 L 0 10 z', fill: 'var(--accent-m)' }));
-    defs.appendChild(mMesh);
+    m.meshes.forEach(ms => drawMeshArc(svg, ms.cx, ms.cy, ms.r, mdir(ms.key), ms.key, ms.key));
 
-    svg.appendChild(defs);
-
-    const { U1, U2, U3, R1, R2, R3 } = values;
-
-    if (activeCircuit === 1) {
-      svg.appendChild(createEl('rect', { x: 140, y: 65, width: 360, height: 170, class: 'wire' }));
-
-      drawSource(svg, 140, 150, 'U1', U1, 'right');
-      drawSource(svg, 500, 150, 'U2', U2, 'right');
-      drawResistor(svg, 320, 65, 'R1', R1, 'top');
-      drawResistor(svg, 320, 235, 'R2', R2, 'bottom');
-
-      drawMeshArc(svg, 320, 150, 32, meshDir.M1, 'M1', 'M1');
-
-      drawSourceVoltageArrow(svg, 105, 100, 105, 200, 'U1', 'left', sourceDirs.U1);
-      drawSourceVoltageArrow(svg, 465, 100, 465, 200, 'U2', 'left', sourceDirs.U2);
-
-      if (currentDirs.I1 === 1) {
-        drawVoltageArrow(svg, 270, 25, 370, 25, 'UR1', 'top');
-        drawVoltageArrow(svg, 370, 275, 270, 275, 'UR2', 'bottom');
-        drawCurrentArrow(svg, 390, 65, 430, 65, 'I1', 'top');
-      } else {
-        drawVoltageArrow(svg, 370, 25, 270, 25, 'UR1', 'top');
-        drawVoltageArrow(svg, 270, 275, 370, 275, 'UR2', 'bottom');
-        drawCurrentArrow(svg, 430, 65, 390, 65, 'I1', 'top');
-      }
-
-    } else {
-      svg.appendChild(createEl('rect', { x: 120, y: 65, width: 400, height: 170, class: 'wire' }));
-      svg.appendChild(createEl('line', { x1: 320, y1: 65, x2: 320, y2: 235, class: 'wire' }));
-
-      svg.appendChild(createEl('circle', { cx: 320, cy: 65, r: 4, fill: 'var(--text-bold)' }));
-      svg.appendChild(createEl('circle', { cx: 320, cy: 235, r: 4, fill: 'var(--text-bold)' }));
-
-      drawSource(svg, 120, 150, 'U1', U1, 'right');
-      drawSource(svg, 320, 150, 'U2', U2, 'right');
-      drawSource(svg, 520, 150, 'U3', U3, 'right');
-
-      drawResistor(svg, 220, 65, 'R1', R1, 'top');
-      drawResistor(svg, 220, 235, 'R2', R2, 'bottom');
-      drawResistor(svg, 420, 65, 'R3', R3, 'top');
-
-      drawMeshArc(svg, 220, 150, 28, meshDir.M1, 'M1', 'M1');
-      drawMeshArc(svg, 420, 150, 30, meshDir.M2, 'M2', 'M2');
-
-      drawSourceVoltageArrow(svg, 85, 100, 85, 200, 'U1', 'left', sourceDirs.U1);
-      drawSourceVoltageArrow(svg, 285, 100, 285, 200, 'U2', 'left', sourceDirs.U2);
-      drawSourceVoltageArrow(svg, 485, 100, 485, 200, 'U3', 'left', sourceDirs.U3);
-
-      if (currentDirs.I1 === 1) drawVoltageArrow(svg, 170, 25, 270, 25, 'UR1', 'top');
-      else drawVoltageArrow(svg, 270, 25, 170, 25, 'UR1', 'top');
-
-      if (currentDirs.I1 === 1) drawVoltageArrow(svg, 265, 275, 175, 275, 'UR2', 'bottom');
-      else drawVoltageArrow(svg, 175, 275, 265, 275, 'UR2', 'bottom');
-
-      if (currentDirs.I2 === 1) drawVoltageArrow(svg, 470, 25, 370, 25, 'UR3', 'top');
-      else drawVoltageArrow(svg, 370, 25, 470, 25, 'UR3', 'top');
-
-      if (currentDirs.I1 === 1) drawCurrentArrow(svg, 265, 65, 295, 65, 'I1', 'top');
-      else drawCurrentArrow(svg, 295, 65, 265, 65, 'I1', 'top');
-
-      if (currentDirs.I2 === 1) drawCurrentArrow(svg, 375, 65, 345, 65, 'I2', 'top');
-      else drawCurrentArrow(svg, 345, 65, 375, 65, 'I2', 'top');
-
-      if (currentDirs.I3 === 1) drawCurrentArrow(svg, 320, 85, 320, 115, 'I3', 'right');
-      else drawCurrentArrow(svg, 320, 115, 320, 85, 'I3', 'right');
-    }
+    // Strompfeile auf den Leitungen; Klick (Advanced) dreht die Richtung
+    m.currents.forEach(c => {
+      if (flip(c.name) === 1) drawCurrentArrow(svg, c.x1, c.y1, c.x2, c.y2, c.name, c.labelPos);
+      else drawCurrentArrow(svg, c.x2, c.y2, c.x1, c.y1, c.name, c.labelPos);
+    });
   }
 
   function drawSource(svg, cx, cy, name, val, textPos = 'left') {
@@ -911,7 +1095,342 @@
     svg.appendChild(g);
   }
 
-  selectCircuit(1);
+  // ===================== KNOTENSATZ – Berechnung =====================
+
+  // Löst die Schaltung am Knoten K. Rückgabe: Ströme I_k in Pfeilrichtung, U_Rk = R_k·I_k,
+  // Knotenspannung V (K gegenüber unterem Knoten) und Zustand ('ok' | 'undetermined' | 'contradiction').
+  function solveKnot(c) {
+    const ks = c.branches.map(b => b.k);
+    const E = {}, R = {};
+    c.branches.forEach(b => {
+      E[b.k] = b.src ? c.vals['U' + b.k] * c.srcDir[b.k] : 0;
+      R[b.k] = b.res ? c.vals['R' + b.k] : 0;
+    });
+
+    // q[k] = Strom, der physikalisch über Zweig k IN den Knoten K fliesst: q = (E - V) / R
+    const q = {};
+    const zero = ks.filter(k => R[k] === 0);
+    let V = null, state = 'ok';
+
+    if (zero.length === 0) {
+      // Knotensatz Σq = 0  →  V = Σ(E/R) / Σ(1/R)
+      let num = 0, den = 0;
+      ks.forEach(k => { num += E[k] / R[k]; den += 1 / R[k]; });
+      V = num / den;
+      ks.forEach(k => { q[k] = (E[k] - V) / R[k]; });
+    } else {
+      // Zweige ohne Widerstand legen die Knotenspannung direkt fest
+      const e0 = E[zero[0]];
+      if (zero.some(k => E[k] !== e0)) {
+        state = 'contradiction';
+        ks.forEach(k => { q[k] = null; });
+      } else {
+        V = e0;
+        let sumOthers = 0;
+        ks.forEach(k => {
+          if (R[k] !== 0) { q[k] = (E[k] - V) / R[k]; sumOthers += q[k]; }
+        });
+        if (zero.length === 1) {
+          q[zero[0]] = -sumOthers;              // folgt aus dem Knotensatz
+        } else {
+          state = 'undetermined';               // nur die Summe dieser Ströme ist bekannt
+          zero.forEach(k => { q[k] = null; });
+        }
+      }
+    }
+
+    const I = {}, UR = {};
+    ks.forEach(k => {
+      I[k] = q[k] === null ? null : q[k] * c.orient[k];
+      if (!c.branches.find(b => b.k === k).res) UR[k] = undefined;        // kein Widerstand im Zweig
+      else if (R[k] === 0) UR[k] = (state === 'contradiction') ? null : 0;
+      else UR[k] = (I[k] === null) ? null : R[k] * I[k];
+    });
+    return { ks, I, UR, V, state, zero };
+  }
+
+  function joinTerms(terms) {
+    return terms.map((t, i) => {
+      const s = t.sign >= 0 ? '+' : '-';
+      return i === 0 ? (s === '-' ? '- ' : '') + t.name : ` ${s} ${t.name}`;
+    }).join('');
+  }
+
+  function calculateKnot() {
+    const c = currentKnot();
+    const mul = nodeInflowIsPositive ? 1 : -1;
+    const iName = k => `I<sub>${k}</sub>`;
+
+    // Prinzip-Schaltung: nur die Knotengleichung, keine Werte und keine Rechnung
+    if (c.principle) {
+      const ks = c.branches.map(b => b.k);
+      const side = list => list.length ? list.map(iName).join(' + ') : '0';
+      document.getElementById('equation-display').innerHTML = `
+        <div class="eq-block eq-block-node">
+          <div class="eq-title eq-title-node">Knoten K [${nodeInflowIsPositive ? 'Zufluss +' : 'Zufluss -'}]</div>
+          <div><strong>Gleichung:</strong> ${formatSum(ks.map(k => ({ name: iName(k), sign: c.orient[k] * mul })))}</div>
+          <div><strong>Zufluss = Abfluss:</strong> ${side(ks.filter(k => c.orient[k] === 1))} = ${side(ks.filter(k => c.orient[k] === -1))}</div>
+        </div>
+      `;
+      return;
+    }
+
+    const s = solveKnot(c);
+    const zweige = list => list.map(k => `Zweig ${k}`).join(', ');
+
+    // Knotengleichung mit Vorzeichen aus Pfeilrichtung und Konvention
+    const applied = s.ks.map(k => ({ name: iName(k), sign: c.orient[k] * mul }));
+    const inflow = s.ks.filter(k => c.orient[k] === 1);
+    const outflow = s.ks.filter(k => c.orient[k] === -1);
+    const side = list => list.length ? list.map(iName).join(' + ') : '0';
+
+    // Zahlen einsetzen und Summe nachrechnen
+    const allKnown = s.ks.every(k => s.I[k] !== null);
+    let numLine;
+    if (allKnown) {
+      const numTerms = s.ks.map(k => ({ name: `(${fmt(s.I[k], 3)})`, sign: c.orient[k] * mul }));
+      const sum = s.ks.reduce((acc, k) => acc + c.orient[k] * mul * s.I[k], 0);
+      numLine = `${joinTerms(numTerms)} = ${fmt(sum, 3)}`;
+    } else {
+      numLine = 'nicht möglich – nicht alle Ströme sind bestimmbar';
+    }
+
+    const warn = [];
+    if (s.state === 'contradiction') {
+      warn.push(`Kurzschluss: ${zweige(s.zero)} haben keinen Widerstand (0 Ω), legen aber unterschiedliche Spannungen an den Knoten. Ein Strom wäre unendlich gross – die Schaltung hat keine Lösung.`);
+    }
+    if (s.state === 'undetermined') {
+      warn.push(`${zweige(s.zero)} haben 0 Ω und dieselbe Spannung. Der Knotensatz legt nur die Summe von ${s.zero.map(iName).join(' und ')} fest – die einzelnen Ströme sind nicht bestimmbar.`);
+    }
+
+    const iList = s.ks.map(k => `${iName(k)} = ${fmt(s.I[k], 3)} A`).join(' | ');
+    const urList = s.ks.filter(k => s.UR[k] !== undefined)
+      .map(k => `U<sub>R${k}</sub>=${fmt(s.UR[k], 2)}V`).join(', ');
+    const anyNegative = s.ks.some(k => s.I[k] !== null && Number(fmt(s.I[k], 3)) < 0);
+
+    document.getElementById('equation-display').innerHTML = `
+      <div class="eq-block eq-block-node">
+        <div class="eq-title eq-title-node">Knoten K [${nodeInflowIsPositive ? 'Zufluss +' : 'Zufluss -'}]</div>
+        <div><strong>Gleichung:</strong> ${formatSum(applied)}</div>
+        <div><strong>Zufluss = Abfluss:</strong> ${side(inflow)} = ${side(outflow)}</div>
+        <div class="eq-sub"><strong>Eingesetzt:</strong> ${numLine}</div>
+      </div>
+
+      <div class="eq-block eq-block-result">
+        <div class="eq-title eq-title-result">Ergebnisse</div>
+        <div class="eq-res">${iList}</div>
+        <div>U<sub>K</sub> = ${fmt(s.V, 2)} V (Knoten K gegenüber unterem Knoten)</div>
+        <div>${urList}</div>
+        ${anyNegative ? '<div class="eq-sub">Negativer Strom: fliesst entgegen dem eingezeichneten Pfeil.</div>' : ''}
+        ${warningHtml(warn)}
+      </div>
+    `;
+  }
+
+  // ===================== KNOTENSATZ – Bedienung =====================
+
+  function toggleKnotDir(k) {
+    const c = currentKnot();
+    c.orient[k] *= -1;
+    updateSimulation();
+  }
+
+  function toggleKnotSource(k) {
+    if (!isAdvanced) return;
+    const c = currentKnot();
+    c.srcDir[k] *= -1;
+    updateSimulation();
+  }
+
+  function openKnotEdit(key) {
+    openEditModal(key, currentKnot().vals);
+  }
+
+  // ===================== KNOTENSATZ – Zeichnung =====================
+
+  function kEl(tag, attrs, parent) {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const a in attrs) el.setAttribute(a, attrs[a]);
+    if (parent) parent.appendChild(el);
+    return el;
+  }
+
+  function kText(parent, x, y, html, attrs = {}) {
+    const t = kEl('text', { x, y, 'font-size': 11, 'font-weight': 'bold', ...attrs }, parent);
+    t.innerHTML = html;
+    return t;
+  }
+
+  function addMarkers(svg) {
+    const defs = kEl('defs', {}, svg);
+    [['arr-v', 'var(--volt-color)'], ['arr-c', 'var(--curr-color)'], ['arr-m', 'var(--accent-m)']].forEach(([id, color]) => {
+      const m = kEl('marker', { id, viewBox: '0 0 10 10', refX: '6', refY: '5', markerWidth: '5', markerHeight: '5', orient: 'auto-start-reverse' }, defs);
+      kEl('path', { d: 'M 0 0 L 10 5 L 0 10 z', fill: color }, m);
+    });
+  }
+
+  const sub = (letter, idx, size = 9) => `${letter}<tspan dy="3" font-size="${size}">${idx}</tspan>`;
+
+  // Spannungsquelle (europäisches Symbol); label: 'line' = "U1 (12V)" rechts, 'stack' = zweizeilig rechts
+  // val === undefined: Prinzip-Schaltung, nur Name und nicht klickbar
+  function drawKSource(svg, cx, cy, k, val, label) {
+    const g = kEl('g', val === undefined ? {} : { class: 'interactive-element', onclick: `openKnotEdit('U${k}')` }, svg);
+    kEl('circle', { cx, cy, r: 16, stroke: 'var(--text-bold)', 'stroke-width': 2, fill: 'var(--bg)' }, g);
+    kEl('line', { x1: cx, y1: cy - 16, x2: cx, y2: cy + 16, stroke: 'var(--text-bold)', 'stroke-width': 1.8 }, g);
+    if (val === undefined) {
+      kText(g, cx + 22, cy + 4, sub('U', k), { class: 'component-text' });
+    } else if (label === 'line') {
+      kText(g, cx + 22, cy + 4, `${sub('U', k)}<tspan dy="-3" font-size="11"> (${val}V)</tspan>`, { class: 'component-text' });
+    } else {
+      kText(g, cx + 20, cy - 2, `${sub('U', k)}<tspan x="${cx + 20}" dy="11" font-size="11">${val}V</tspan>`, { class: 'component-text' });
+    }
+  }
+
+  // Senkrechter Widerstand (20 × 40); side 'left'/'right', stack = zweizeilige Beschriftung
+  function drawKResistor(svg, cx, cy, k, val, side, stack) {
+    const g = kEl('g', val === undefined ? {} : { class: 'interactive-element', onclick: `openKnotEdit('R${k}')` }, svg);
+    kEl('rect', { x: cx - 10, y: cy - 20, width: 20, height: 40, stroke: 'var(--text-bold)', 'stroke-width': 2, fill: 'var(--bg)' }, g);
+    const x = side === 'left' ? cx - 16 : cx + 16;
+    const anchor = side === 'left' ? 'end' : 'start';
+    if (val === undefined) {
+      kText(g, x, cy + 4, sub('R', k), { class: 'component-text', 'text-anchor': anchor });
+    } else if (stack) {
+      kText(g, x, cy - 2, `${sub('R', k)}<tspan x="${x}" dy="11" font-size="11">${val}Ω</tspan>`, { class: 'component-text', 'text-anchor': anchor });
+    } else {
+      kText(g, x, cy + 4, `${sub('R', k)}<tspan dy="-3" font-size="11"> = ${val}Ω</tspan>`, { class: 'component-text', 'text-anchor': anchor });
+    }
+  }
+
+  // Strompfeil (immer klickbar im Knotensatz); labelPos 'top' | 'left' | 'right'
+  function drawKCurrent(svg, x1, y1, x2, y2, k, labelPos) {
+    const g = kEl('g', { class: 'interactive-element', onclick: `toggleKnotDir(${k})` }, svg);
+    kEl('line', { x1, y1, x2, y2, class: 'hit-area' }, g);
+    kEl('line', { x1, y1, x2, y2, stroke: 'var(--curr-color)', 'stroke-width': 2.2, 'marker-end': 'url(#arr-c)' }, g);
+    let tx = (x1 + x2) / 2, ty = (y1 + y2) / 2, anchor = 'middle';
+    if (labelPos === 'top') ty -= 7;
+    else if (labelPos === 'left') { tx -= 9; ty += 4; anchor = 'end'; }
+    else if (labelPos === 'right') { tx += 9; ty += 4; anchor = 'start'; }
+    kText(g, tx, ty, sub('I', k, 8), { fill: 'var(--curr-color)', 'text-anchor': anchor });
+  }
+
+  // Spannungspfeil einer Quelle, 35 px links der Quelle (wie im Maschensatz)
+  function drawKSourceArrow(svg, x, yTop, yBot, k, dir) {
+    const g = kEl('g', isAdvanced ? { class: 'interactive-element', onclick: `toggleKnotSource(${k})` } : {}, svg);
+    if (isAdvanced) kEl('line', { x1: x, y1: yTop, x2: x, y2: yBot, class: 'hit-area' }, g);
+    const [ys, ye] = dir === 1 ? [yTop, yBot] : [yBot, yTop];
+    kEl('path', { d: `M ${x} ${ys} L ${x} ${ye}`, stroke: 'var(--volt-color)', 'stroke-width': 1.8, 'marker-end': 'url(#arr-v)' }, g);
+    kText(g, x - 10, (yTop + yBot) / 2 + 4, sub('U', k, 8), { fill: 'var(--volt-color)', 'text-anchor': 'end' });
+  }
+
+  function drawNode(svg, x, y) {
+    kEl('circle', { cx: x, cy: y, r: 4, fill: 'var(--text-bold)' }, svg);
+  }
+
+  // Linkes Knotenbild: Knoten K mit allen Strömen als Strahlen
+  function drawKnotPicture(svg, c, angles) {
+    const cx = 140, cy = 155, L = 105;
+    c.branches.forEach((b, i) => {
+      const a = angles[i] * Math.PI / 180;
+      const dx = Math.cos(a), dy = -Math.sin(a);
+      const ex = cx + dx * L, ey = cy + dy * L;
+      kEl('line', { x1: cx, y1: cy, x2: ex, y2: ey, class: 'wire' }, svg);
+
+      // Pfeil auf dem Strahl: hinein = Richtung Knoten
+      const p = t => [cx + dx * L * t, cy + dy * L * t];
+      const [ax1, ay1] = p(0.74), [ax2, ay2] = p(0.5);
+      const into = c.orient[b.k] === 1;
+      const g = kEl('g', { class: 'interactive-element', onclick: `toggleKnotDir(${b.k})` }, svg);
+      kEl('line', { x1: cx + dx * 20, y1: cy + dy * 20, x2: ex, y2: ey, class: 'hit-area' }, g);
+      kEl('line', into ? { x1: ax1, y1: ay1, x2: ax2, y2: ay2 } : { x1: ax2, y1: ay2, x2: ax1, y2: ay1 }, g)
+        .setAttribute('style', 'stroke: var(--curr-color); stroke-width: 2.2;');
+      g.lastChild.setAttribute('marker-end', 'url(#arr-c)');
+
+      // Beschriftung seitlich des Strahls, bevorzugt oberhalb
+      let nx = -dy, ny = dx;
+      if (ny > 0.2 || (Math.abs(ny) <= 0.2 && nx < 0)) { nx = -nx; ny = -ny; }
+      const [mx, my] = p(0.62);
+      const off = n => n > 5 ? 13 : 16;
+      kText(g, mx + nx * off(c.branches.length), my + ny * off(c.branches.length) + 5, sub('I', b.k, 9), { fill: 'var(--curr-color)', 'text-anchor': 'middle', 'font-size': 14 });
+    });
+    kEl('circle', { cx, cy, r: 5, fill: 'var(--text-bold)' }, svg);
+    kText(svg, cx + 10, cy + 18, 'K', { fill: 'var(--text-bold)' });
+
+    // Gleichheitszeichen zwischen Knotenbild und Schaltung
+    kText(svg, 280, 168, '=', { fill: 'var(--text-bold)', 'font-size': 40, 'text-anchor': 'middle' });
+  }
+
+  function renderKnotSVG() {
+    const svg = document.getElementById('circuit-svg');
+    svg.innerHTML = '';
+    addMarkers(svg);
+    const c = currentKnot();
+    const n = c.branches.length;
+
+    if (knotCircuit === 1) {
+      drawKnotPicture(svg, c, [200, 80, -40]);   // symmetrisch: 120° zwischen den Strömen
+
+      // Schaltung wie Vorlage: Quelle links, R2 und R3 parallel
+      const xS = 390, x2 = 640, x3 = 830, yT = 65, yB = 235;
+      kEl('rect', { x: xS, y: yT, width: x3 - xS, height: yB - yT, class: 'wire' }, svg);
+      kEl('line', { x1: x2, y1: yT, x2: x2, y2: yB, class: 'wire' }, svg);
+      drawNode(svg, x2, yT); drawNode(svg, x2, yB);
+      kText(svg, x2 + 8, yT - 8, 'K', { fill: 'var(--text-bold)' });
+
+      drawKSource(svg, xS, 150, 1, c.vals.U1, 'line');
+      drawKSourceArrow(svg, xS - 35, 100, 200, 1, c.srcDir[1]);
+      drawKResistor(svg, x2, 150, 2, c.vals.R2, 'right', false);
+      drawKResistor(svg, x3, 150, 3, c.vals.R3, 'left', false);
+
+      // Strompfeile auf den Leitungen: I1 auf der oberen Leitung (nach rechts = in den Knoten),
+      // I2/I3 auf den Zweigleitungen zwischen Knoten und Widerstand (nach oben = in den Knoten)
+      if (c.orient[1] === 1) drawKCurrent(svg, 490, yT, 530, yT, 1, 'top');
+      else drawKCurrent(svg, 530, yT, 490, yT, 1, 'top');
+      if (c.orient[2] === 1) drawKCurrent(svg, x2, 120, x2, 82, 2, 'left');
+      else drawKCurrent(svg, x2, 82, x2, 120, 2, 'left');
+      if (c.orient[3] === 1) drawKCurrent(svg, x3, 120, x3, 82, 3, 'right');
+      else drawKCurrent(svg, x3, 82, x3, 120, 3, 'right');
+      return;
+    }
+
+    // Schaltung 2: Strahlen gleichmässig verteilt
+    drawKnotPicture(svg, c, c.branches.map((b, i) => 200 - i * 360 / n));
+
+    // Platzbedarf je Zweig: links (Spannungspfeil der Quelle) und rechts (Beschriftungen) + Luft
+    const leftZone = b => b.src ? 64 : 14, rightZone = 40, gap = 40;
+    const xs = [];
+    let x = 0;
+    c.branches.forEach((b, i) => { x += (i === 0 ? leftZone(b) : rightZone + gap + leftZone(b)); xs.push(x); });
+    const total = x + rightZone;
+    const offset = 305 + (650 - total) / 2;
+    const X = xs.map(v => v + offset);
+    const yT = 65, yB = 235;
+
+    kEl('line', { x1: X[0], y1: yT, x2: X[n - 1], y2: yT, class: 'wire' }, svg);
+    kEl('line', { x1: X[0], y1: yB, x2: X[n - 1], y2: yB, class: 'wire' }, svg);
+    kText(svg, (X[0] + X[n - 1]) / 2, yT - 12, 'Knoten K', { fill: 'var(--text-bold)', 'text-anchor': 'middle' });
+
+    c.branches.forEach((b, i) => {
+      const bx = X[i];
+      kEl('line', { x1: bx, y1: yT, x2: bx, y2: yB, class: 'wire' }, svg);
+      if (i > 0 && i < n - 1) { drawNode(svg, bx, yT); drawNode(svg, bx, yB); }
+
+      // Prinzip-Schaltung ohne Werte: Quelle in Reihe mit Widerstand oder nur Widerstand
+      let yA1, yA2;   // Strompfeil auf der Zweigleitung zwischen Knoten K und erstem Bauteil
+      if (b.src) {
+        drawKSource(svg, bx, 132, b.k, undefined);
+        drawKSourceArrow(svg, bx - 35, 97, 167, b.k, c.srcDir[b.k]);
+        drawKResistor(svg, bx, 198, b.k, undefined, 'right');
+        [yA1, yA2] = [78, 108];
+      } else {
+        drawKResistor(svg, bx, 165, b.k, undefined, 'right');
+        [yA1, yA2] = [80, 128];
+      }
+      if (c.orient[b.k] === 1) drawKCurrent(svg, bx, yA2, bx, yA1, b.k, 'right');   // nach oben = in den Knoten
+      else drawKCurrent(svg, bx, yA1, bx, yA2, b.k, 'right');
+    });
+  }
+
+  updateSimulation();
 </script>
 </body>
 </html>
